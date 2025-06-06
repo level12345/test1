@@ -1,0 +1,77 @@
+import pandas as pd
+from collections import defaultdict
+
+# Set your Excel file path
+xlsx_input_path = "generated_cpp_assignments.xlsx"  # Adjust if needed
+
+# Helper to normalize masks to 32-bit integers
+def normalize_mask(mask_str):
+    try:
+        if isinstance(mask_str, str) and mask_str.startswith("0x"):
+            return int(mask_str, 16)
+        elif isinstance(mask_str, str) and mask_str.startswith("0b"):
+            return int(mask_str, 2)
+        elif isinstance(mask_str, int):
+            return mask_str
+        else:
+            return int(mask_str)
+    except Exception:
+        return None
+
+# Data structures to track bitmaps and history
+bitmaps = defaultdict(int)
+assignments = defaultdict(list)
+conflict_report = []
+
+# Load Excel
+df = pd.read_excel(xlsx_input_path)
+
+for idx, row in df.iterrows():
+    variable = str(row['Variable']).strip()
+    buffer = str(row['Buffer']).strip()
+    frame = int(row['Frame'])
+    offset = int(row['Offset'])
+    mask_str = str(row['Mask']).strip()
+    line_number = idx + 2  # Excel line (1-based, with header)
+
+    mask = normalize_mask(mask_str)
+    key = (buffer, frame, offset)
+
+    prior_mask = bitmaps[key]
+    overlap = mask is not None and (prior_mask & mask) != 0
+
+    conflicting_lines = []
+    if overlap:
+        for prev in assignments[key]:
+            prev_mask = normalize_mask(prev['Mask'])
+            if prev_mask is not None and (prev_mask & mask) != 0:
+                conflicting_lines.append(str(prev['Line']))
+
+    assignments[key].append({
+        "Variable": variable,
+        "Mask": mask_str,
+        "Line": line_number
+    })
+
+    if mask is not None:
+        bitmaps[key] |= mask
+
+    conflict_report.append({
+        "Buffer": buffer,
+        "Frame": frame,
+        "Offset": offset,
+        "Variable": variable,
+        "Mask": mask_str,
+        "Line": line_number,
+        "Conflict": "YES" if overlap else "",
+        "Conflicts With (Lines)": ", ".join(conflicting_lines) if conflicting_lines else ""
+    })
+
+# Output final report
+output_csv = "spreadsheet_conflict_report_detailed.csv"
+pd.DataFrame(conflict_report).to_csv(output_csv, index=False)
+print(f"✅ Conflict report saved to: {output_csv}")
+
+#run commands
+#pip3 install pandas openpyxl
+#python3 validate_excel_masks.py
