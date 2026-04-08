@@ -1,0 +1,258 @@
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        timeout(time: 1, unit: 'HOURS')
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+    }
+
+    parameters {
+        string(name: 'REPO_1_BRANCH',     defaultValue: 'main',           description: 'Branch for Repo One')
+        string(name: 'REPO_2_BRANCH',     defaultValue: 'develop',        description: 'Branch for Repo Two')
+        string(name: 'SUBMODULE_BRANCH',  defaultValue: 'dev2.2',         description: 'Submodule branch')
+        choice(name: 'CMAKE_PRESET',      choices: ['windows-preset', 'windows-debug', 'windows-release'], description: 'CMake preset to use')
+        booleanParam(name: 'DEBUG_MODE',       defaultValue: false, description: 'Enable extra debug logging')
+        booleanParam(name: 'CLEAN_WORKSPACE',  defaultValue: false, description: 'Wipe workspace before building')
+        booleanParam(name: 'PARALLEL_BUILDS',  defaultValue: false, description: 'Run project builds in parallel')
+    }
+
+    environment {
+        REPO_1_URL   = "https://github.com/your-org/repo-one.git"
+        REPO_2_URL   = "https://github.com/your-org/repo-two.git"
+        ROOT_DIR     = "${WORKSPACE}\\root"
+        CONFIG_DIR   = "${WORKSPACE}\\root\\repo-two\\config"
+        SCRIPTS_DIR  = "${WORKSPACE}\\root\\repo-two\\scripts"
+        CMAKE_PRESET = "${params.CMAKE_PRESET}"
+        BUILD_ROOT   = "${WORKSPACE}\\root\\repo-two\\folderA\\folderB\\folderC"
+    }
+
+    stages {
+
+        stage('Clean Workspace') {
+            when {
+                expression { return params.CLEAN_WORKSPACE == true }
+            }
+            steps {
+                bat '''
+                    echo ===== CLEANING WORKSPACE =====
+                    if exist "%ROOT_DIR%" rmdir /s /q "%ROOT_DIR%"
+                    echo Workspace cleaned
+                '''
+            }
+        }
+
+        stage('Prepare Root Folder') {
+            steps {
+                bat '''
+                    echo ===== PREPARING ROOT FOLDER =====
+                    if not exist "%ROOT_DIR%" mkdir "%ROOT_DIR%"
+                    echo Root folder ready: %ROOT_DIR%
+                '''
+            }
+        }
+
+        stage('Validate Tools') {
+            steps {
+                bat '''
+                    echo ===== VALIDATING TOOLS =====
+                    cmake --version || (echo ERROR: cmake not found && exit /b 1)
+                    git --version   || (echo ERROR: git not found && exit /b 1)
+                '''
+            }
+        }
+
+        stage('Clone Repos') {
+            parallel {
+                stage('Clone Repo One') {
+                    steps {
+                        dir("${ROOT_DIR}\\repo-one") {
+                            git(
+                                url: env.REPO_1_URL,
+                                branch: params.REPO_1_BRANCH,
+                                credentialsId: 'your-credentials-id'
+                            )
+                            bat '''
+                                echo ===== REPO ONE CLONE INFO =====
+                                echo Branch:
+                                git branch
+                                echo Latest Commit:
+                                git log --oneline -1
+                                echo Remote:
+                                git remote -v
+                            '''
+                        }
+                    }
+                }
+                stage('Clone Repo Two') {
+                    steps {
+                        dir("${ROOT_DIR}\\repo-two") {
+                            git(
+                                url: env.REPO_2_URL,
+                                branch: params.REPO_2_BRANCH,
+                                credentialsId: 'your-credentials-id'
+                            )
+                            bat '''
+                                echo ===== REPO TWO CLONE INFO =====
+                                echo Branch:
+                                git branch
+                                echo Latest Commit:
+                                git log --oneline -1
+                                echo Remote:
+                                git remote -v
+                            '''
+
+                            bat '''
+                                echo ===== INITIALISING SUBMODULES =====
+                                git submodule update --init --recursive
+
+                                echo ===== CHECKING OUT SUBMODULE BRANCHES =====
+                                git submodule foreach --recursive git checkout %SUBMODULE_BRANCH%
+
+                                echo ===== SUBMODULE STATUS =====
+                                git submodule status --recursive
+
+                                echo ===== SUBMODULE COMMIT DETAILS =====
+                                git submodule foreach --recursive "echo Submodule: %name% && git log --oneline -1 && git branch && git status"
+                            '''
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Debug Workspace') {
+            when {
+                expression { return params.DEBUG_MODE == true }
+            }
+            steps {
+                bat '''
+                    echo ===== WORKSPACE STRUCTURE =====
+                    dir "%ROOT_DIR%" /s /b
+
+                    echo ===== ENVIRONMENT VARIABLES =====
+                    echo ROOT_DIR:     %ROOT_DIR%
+                    echo CONFIG_DIR:   %CONFIG_DIR%
+                    echo SCRIPTS_DIR:  %SCRIPTS_DIR%
+                    echo CMAKE_PRESET: %CMAKE_PRESET%
+                    echo BUILD_ROOT:   %BUILD_ROOT%
+
+                    echo ===== VALIDATING KEY PATHS EXIST =====
+                    if exist "%CONFIG_DIR%" (
+                        echo CONFIG_DIR OK: %CONFIG_DIR%
+                    ) else (
+                        echo ERROR: CONFIG_DIR not found: %CONFIG_DIR%
+                    )
+
+                    if exist "%SCRIPTS_DIR%" (
+                        echo SCRIPTS_DIR OK: %SCRIPTS_DIR%
+                    ) else (
+                        echo ERROR: SCRIPTS_DIR not found: %SCRIPTS_DIR%
+                    )
+
+                    if exist "%BUILD_ROOT%" (
+                        echo BUILD_ROOT OK: %BUILD_ROOT%
+                    ) else (
+                        echo ERROR: BUILD_ROOT not found: %BUILD_ROOT%
+                    )
+                '''
+            }
+        }
+
+        stage('Build All Projects') {
+            steps {
+                script {
+                    def projects = [
+                        [name: 'Project One',   path: "${env.BUILD_ROOT}\\projectOne"],
+                        [name: 'Project Two',   path: "${env.BUILD_ROOT}\\projectTwo"],
+                        [name: 'Project Three', path: "${env.BUILD_ROOT}\\projectThree"],
+                        [name: 'Project Four',  path: "${env.BUILD_ROOT}\\projectFour"],
+                    ]
+
+                    def buildStages = [:]
+
+                    projects.each { project ->
+                        def proj = project
+                        buildStages[proj.name] = {
+                            stage("Build: ${proj.name}") {
+                                dir(proj.path) {
+                                    bat """
+                                        echo ===== BUILDING ${proj.name} =====
+                                        echo Working directory:
+                                        cd
+
+                                        echo ===== VALIDATING CMAKEPRESETS.JSON =====
+                                        if exist "CMakePresets.json" (
+                                            echo CMakePresets.json found
+                                        ) else (
+                                            echo ERROR: CMakePresets.json not found
+                                            exit /b 1
+                                        )
+
+                                        echo ===== CMAKE PRESET - ${proj.name} =====
+                                        cmake --preset %CMAKE_PRESET%
+
+                                        echo ===== CMAKE BUILD - ${proj.name} =====
+                                        cmake --build --preset %CMAKE_PRESET%
+
+                                        echo ===== ${proj.name} COMPLETE =====
+                                    """
+                                }
+                            }
+                        }
+                    }
+
+                    if (params.PARALLEL_BUILDS) {
+                        echo "Running builds in parallel"
+                        parallel buildStages
+                    } else {
+                        echo "Running builds sequentially"
+                        buildStages.each { name, buildStage -> buildStage() }
+                    }
+                }
+            }
+        }
+
+        stage('Archive Artifacts') {
+            steps {
+                bat '''
+                    echo ===== SEARCHING FOR ARTIFACTS =====
+                    dir "%ROOT_DIR%\\repo-two\\build" /s /b *.exe
+
+                    echo ===== ARTIFACT COUNT =====
+                    dir "%ROOT_DIR%\\repo-two\\build" /s /b *.exe | find /c ".exe"
+                '''
+                archiveArtifacts(
+                    artifacts: 'root/repo-two/build/**/*.exe',
+                    fingerprint: true,
+                    allowEmptyArchive: false
+                )
+            }
+        }
+
+    }
+
+    post {
+        always {
+            bat '''
+                echo ===== BUILD SUMMARY =====
+                echo Job:        %JOB_NAME%
+                echo Build No:   %BUILD_NUMBER%
+                echo Workspace:  %WORKSPACE%
+                echo Node:       %NODE_NAME%
+            '''
+        }
+        success {
+            echo "Build completed successfully!"
+        }
+        failure {
+            bat '''
+                echo ===== FAILURE DIAGNOSTICS =====
+                dir "%ROOT_DIR%" /s /b
+            '''
+        }
+        cleanup {
+            echo "Pipeline finished"
+        }
+    }
+}
